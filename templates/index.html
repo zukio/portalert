@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Port Alert</title>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</head>
+<body>
+    <h1>Port Alert</h1>
+    <form id="portForm" method="post">
+        <label for="port">ポートID:</label>
+        <select id="port" name="port">
+            <option value="0">選択してください</option>
+            {% for port in ports %}
+                <option value="{{ port.station_id }}">{{ port.name }}</option>
+            {% endfor %}
+        </select>
+        <br>
+        <label for="notification-method">通知方法:</label>
+        <select id="notification-method" name="notification-method">
+            <option value="LINE">LINE</option>
+            <option value="IFTTT">IFTTT</option>
+            <option value="Zapier">Zapier</option>
+        </select>
+        <br>
+        <input type="submit" value="登録">
+    </form>
+    <ul id="notifications">
+        {% for setting in notification_settings %}
+            <li>ポートID: {{ setting.port_id }}, 通知方法: {{ setting.notification_method }}</li>
+        {% endfor %}
+    </ul>
+</body>
+</html>
