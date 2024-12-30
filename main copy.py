@@ -1,5 +1,4 @@
 import os
-import requests
 from flask import Flask, request, render_template, jsonify, redirect, url_for
 from apscheduler.schedulers.background import BackgroundScheduler
 import requests
@@ -32,29 +31,20 @@ logger = logging.getLogger(__name__)
 def init_db():
     with sqlite3.connect('sharecycle.db') as conn:
         c = conn.cursor()
-        # ユーザーテーブルの作成
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                user_id TEXT PRIMARY KEY,
-                webhook_url TEXT NOT NULL
-            )
-        ''')
-        # ポート登録テーブルの作成
         c.execute('''
             CREATE TABLE IF NOT EXISTS user_ports (
                 user_id TEXT,
                 port_id TEXT,
-                PRIMARY KEY (user_id, port_id),
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
+                notification_type TEXT,
+                webhook_url TEXT,
+                PRIMARY KEY (user_id, port_id)
             )
         ''')
         conn.commit()
 
-
 # シェアサイクルAPIからデータを取得
 from geopy.distance import geodesic
 
-# ポートデータを取得
 def fetch_port_data():
     try:
         # APIからデータを取得
@@ -81,55 +71,45 @@ def fetch_port_data():
         logger.error(f"APIリクエストエラー: {e}")
         return []
 
-# ポートの在庫データを取得
-def fetch_station_status():
-    try:
-        response = requests.get('https://api-public.odpt.org/api/v4/gbfs/docomo-cycle-tokyo/station_status.json')
-        data = response.json()
-        return data['data']['stations']
-    except Exception as e:
-        logger.error(f"APIリクエストエラー: {e}")
-        return []
 
 # 在庫チェックと通知
 def check_and_notify():
-    stations = fetch_station_status()
+    port_data = fetch_port_data()
+    if not port_data:
+        return
+
     with sqlite3.connect('sharecycle.db') as conn:
         c = conn.cursor()
-        c.execute('SELECT users.user_id, users.webhook_url, user_ports.port_id FROM users JOIN user_ports ON users.user_id = user_ports.user_id')
+        c.execute('SELECT * FROM user_ports')
         user_ports = c.fetchall()
 
-        for user_id, webhook_url, port_id in user_ports:
-            station = next((s for s in stations if s['station_id'] == port_id), None)
-            if station and station['num_bikes_available'] == 1:
-                send_webhook_notification(user_id, port_id, webhook_url)
+        for user_port in user_ports:
+            user_id, port_id, notification_type, webhook_url = user_port
+            port = next((p for p in port_data if p['id'] == port_id), None)
 
-# Webhook URLにPOSTリクエストを送信
-def send_webhook_notification(user_id, port_id, webhook_url):
-    payload = {
-        'user_id': user_id,
-        'port_id': port_id,
-        'message': f"ポート {port_id} に自転車が1台あります！"
-    }
-    try:
-        response = requests.post(webhook_url, json=payload)
-        if response.status_code == 200:
-            logger.info(f"Webhook通知成功: {webhook_url}")
-        else:
-            logger.error(f"Webhook通知失敗: {response.status_code}, {response.text}")
-    except Exception as e:
-        logger.error(f"Webhook送信エラー: {e}")
+            if port and port['bikes_available'] > 0:
+                if notification_type == 'line':
+                    try:
+                        message = f"ポート{port_id}に自転車が{port['bikes_available']}台あります！"
+                        line_bot_api.push_message(
+                            user_id, TextSendMessage(text=message))
+                    except Exception as e:
+                        logger.error(f"LINE通知エラー: {e}")
+
+                elif notification_type == 'webhook' and webhook_url:
+                    try:
+                        requests.post(webhook_url, json={
+                            'port_id': port_id,
+                            'bikes_available': port['bikes_available']
+                        })
+                    except Exception as e:
+                        logger.error(f"Webhook通知エラー: {e}")
+
 
 # スケジューラーの設定
 scheduler = BackgroundScheduler()
 scheduler.add_job(check_and_notify, 'interval', minutes=5)
 scheduler.start()
-
-@app.route('/status')
-def status():
-    stations = fetch_station_status()
-    available_stations = [station for station in stations if station['num_bikes_available'] > 0]
-    return render_template('status.html', stations=available_stations)
 
 
 @app.route('/', methods=['GET', 'POST'])
@@ -142,15 +122,12 @@ def index():
             
             with sqlite3.connect('sharecycle.db') as conn:
                 c = conn.cursor()
-                # ユーザーが存在しなければ追加
-                c.execute('INSERT OR IGNORE INTO users (user_id) VALUES (?)', (user_id,))
-								# ポートとWebhook URLを登録
                 c.execute('''
                     INSERT INTO user_ports (user_id, port_id, notification_type) 
                     VALUES (?, ?, ?)
                 ''', (user_id, selected_port_id, notification_method))
                 conn.commit()
-            # return jsonify({'status': 'success'})
+            
             return redirect(url_for('index'))
         
         # GETリクエストの処理
@@ -165,39 +142,22 @@ def index():
 @app.route('/set_port', methods=['POST'])
 def set_port():
     data = request.json
-    user_id = data.get('user_id')  # 必須
-    port_id = data.get('port_id')  # 必須
-    webhook_url = data.get('webhook_url')  # 必須（初回登録時のみ必要）
+    user_id = data.get('user_id')
+    port_id = data.get('port_id')
+    notification_type = data.get('notification_type', 'line')
+    webhook_url = data.get('webhook_url')
 
     try:
         with sqlite3.connect('sharecycle.db') as conn:
             c = conn.cursor()
-            # ユーザーを登録（すでに存在する場合は無視）
-            c.execute('INSERT OR IGNORE INTO users (user_id, webhook_url) VALUES (?, ?)',
-                      (user_id, webhook_url))
-            # ポートを登録
-            c.execute('INSERT OR IGNORE INTO user_ports (user_id, port_id) VALUES (?, ?)',
-                      (user_id, port_id))
+            c.execute('''
+                INSERT OR REPLACE INTO user_ports (user_id, port_id, notification_type, webhook_url)
+                VALUES (?, ?, ?, ?)
+            ''', (user_id, port_id, notification_type, webhook_url))
             conn.commit()
         return jsonify({'status': 'success'})
     except Exception as e:
         logger.error(f"データベース更新エラー: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/unset_port', methods=['POST'])
-def unset_port():
-    data = request.json
-    user_id = data.get('user_id')  # 必須
-    port_id = data.get('port_id')  # 必須
-
-    try:
-        with sqlite3.connect('sharecycle.db') as conn:
-            c = conn.cursor()
-            c.execute('DELETE FROM user_ports WHERE user_id = ? AND port_id = ?', (user_id, port_id))
-            conn.commit()
-        return jsonify({'status': 'success'})
-    except Exception as e:
-        logger.error(f"データベース削除エラー: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
