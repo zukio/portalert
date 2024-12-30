@@ -1,28 +1,38 @@
 import os
 import requests
+import json
+import logging
+import sqlite3
+import time
+from dotenv import load_dotenv
 from flask import Flask, request, render_template, jsonify, redirect, url_for
 from apscheduler.schedulers.background import BackgroundScheduler
-import requests
-import sqlite3
 from datetime import datetime
-import logging
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.v3.messaging import MessagingApi
+from linebot.v3.messaging.models import TextMessage
 from geopy.distance import geodesic
 
+
+# .envファイルを読み込む
+load_dotenv()
+
 # 環境変数の設定
-LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET', 'your-channel-secret')
+LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv(
-    'LINE_CHANNEL_ACCESS_TOKEN', 'your-channel-access-token')
+    'LINE_CHANNEL_ACCESS_TOKEN')
 
 # グローバル変数の初期化
 ports = []
 notification_settings = []
 
 app = Flask(__name__)
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+# Messaging APIクライアントの初期化
+line_bot_api = MessagingApi(LINE_CHANNEL_ACCESS_TOKEN)
+# 旧　line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
 
 # ロギングの設定
 logging.basicConfig(level=logging.INFO)
@@ -45,7 +55,9 @@ def init_db():
                 user_id TEXT,
                 port_id TEXT,
                 PRIMARY KEY (user_id, port_id),
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
+                FOREIGN KEY (user_id) REFERENCES users(user_id),
+                notification_type TEXT,
+                last_notified INTEGER DEFAULT 0
             )
         ''')
         conn.commit()
@@ -92,33 +104,69 @@ def fetch_station_status():
         return []
 
 # 在庫チェックと通知
+import time
+
 def check_and_notify():
     stations = fetch_station_status()
+    current_time = int(time.time())  # 現在時刻をUnixタイムスタンプで取得
+
     with sqlite3.connect('sharecycle.db') as conn:
         c = conn.cursor()
-        c.execute('SELECT users.user_id, users.webhook_url, user_ports.port_id FROM users JOIN user_ports ON users.user_id = user_ports.user_id')
+        c.execute('SELECT user_id, port_id, last_notified FROM user_ports')
         user_ports = c.fetchall()
 
-        for user_id, webhook_url, port_id in user_ports:
+        for user_id, port_id, last_notified in user_ports:
             station = next((s for s in stations if s['station_id'] == port_id), None)
+
             if station and station['num_bikes_available'] == 1:
-                send_webhook_notification(user_id, port_id, webhook_url)
+                # 通知の間隔を確認 (例: 3600秒 = 1時間)
+                if current_time - last_notified >= 3600:
+                    send_notification(user_id, port_id)
+                    # 通知後、last_notifiedを更新
+                    c.execute('UPDATE user_ports SET last_notified = ? WHERE user_id = ? AND port_id = ?',
+                              (current_time, user_id, port_id))
+                    conn.commit()
+
+# LINEとWebhook通知を統合
+def send_notification(user_id, port_id):
+    message = f"ポート {port_id} に自転車が1台あります！"
+
+    # LINE通知を送信
+    try:
+        send_line_notification(user_id, message)
+    except Exception as e:
+        logger.error(f"LINE通知エラー: {e}")
+
+    # Webhook通知を送信
+    try:
+        send_webhook_notification(user_id, port_id, message)
+    except Exception as e:
+        logger.error(f"Webhook通知エラー: {e}")
+
 
 # Webhook URLにPOSTリクエストを送信
-def send_webhook_notification(user_id, port_id, webhook_url):
-    payload = {
-        'user_id': user_id,
-        'port_id': port_id,
-        'message': f"ポート {port_id} に自転車が1台あります！"
-    }
+def send_webhook_notification(user_id, port_id, message):
+    # Webhook URLをデータベースから取得
+    with sqlite3.connect('sharecycle.db') as conn:
+        c = conn.cursor()
+        c.execute('SELECT webhook_url FROM users WHERE user_id = ?', (user_id,))
+        webhook_url = c.fetchone()
+        if webhook_url:
+            try:
+                requests.post(webhook_url[0], json={'port_id': port_id, 'message': message})
+            except Exception as e:
+                logger.error(f"Webhook通知エラー: {e}")
+
+# LINEユーザーに通知
+def send_line_notification(user_id, message):
     try:
-        response = requests.post(webhook_url, json=payload)
-        if response.status_code == 200:
-            logger.info(f"Webhook通知成功: {webhook_url}")
-        else:
-            logger.error(f"Webhook通知失敗: {response.status_code}, {response.text}")
+        line_bot_api.push_message(
+            to=user_id,
+            messages=[TextMessage(text=message)]
+        )
     except Exception as e:
-        logger.error(f"Webhook送信エラー: {e}")
+        logger.error(f"LINE通知エラー: {e}")
+
 
 # スケジューラーの設定
 scheduler = BackgroundScheduler()
@@ -131,7 +179,7 @@ def status():
     available_stations = [station for station in stations if station['num_bikes_available'] > 0]
     return render_template('status.html', stations=available_stations)
 
-
+# 非LINEユーザーの場合、ブラウザUIから Webhook URLを登録
 @app.route('/', methods=['GET', 'POST'])
 def index():
     try:
@@ -161,7 +209,7 @@ def index():
         logger.error(f"インデックスページ処理エラー: {e}")
         return render_template('error.html', message="エラーが発生しました"), 500
 
-
+# 非LINEユーザーのためのAPIエンドポイントで、フロントエンド（static/script.js）から呼び出されています。
 @app.route('/set_port', methods=['POST'])
 def set_port():
     data = request.json
@@ -183,6 +231,7 @@ def set_port():
     except Exception as e:
         logger.error(f"データベース更新エラー: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
+    
 
 @app.route('/unset_port', methods=['POST'])
 def unset_port():
@@ -200,44 +249,38 @@ def unset_port():
         logger.error(f"データベース削除エラー: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-
-@app.route("/webhook", methods=['POST'])
+# LINE Webhookの設定
+@app.route('/webhook', methods=['POST'])
 def webhook():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
 
     try:
-        handler.handle(body, signature)
-    except InvalidSignatureError:
-        return 'Invalid signature', 400
+        # Webhookデータの処理
+        handle_message(body, signature)
+    except Exception as e:
+        logger.error(f"Webhook処理エラー: {e}")
+        return f"Error: {str(e)}", 400
+
     return 'OK'
 
+def handle_message(body, signature):
+    # LINEイベントデータを解析
+    event = json.loads(body)  # JSONデータを辞書に変換
+    # 旧 event = MessageEvent.from_dict(body)
+    user_id = event.source.user_id
+    message_text = event.message.text
 
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    try:
-        port_id = event.message.text
-        user_id = event.source.user_id
-
+    # メッセージがポートIDの場合の処理
+    if message_text.isdigit():
+        port_id = message_text
         with sqlite3.connect('sharecycle.db') as conn:
             c = conn.cursor()
-            c.execute('''
-                INSERT OR REPLACE INTO user_ports (user_id, port_id, notification_type)
-                VALUES (?, ?, ?)
-            ''', (user_id, port_id, 'line'))
+            c.execute('INSERT OR IGNORE INTO users (user_id) VALUES (?)', (user_id,))
+            c.execute('INSERT OR IGNORE INTO user_ports (user_id, port_id) VALUES (?, ?)', (user_id, port_id))
             conn.commit()
-
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text=f"ポート{port_id}の監視を開始します。")
-        )
-    except Exception as e:
-        logger.error(f"メッセージ処理エラー: {e}")
-        line_bot_api.reply_message(
-            event.reply_token,
-            TextSendMessage(text="エラーが発生しました。")
-        )
-
+        logger.info(f"ポート {port_id} がユーザー {user_id} に登録されました。")
+        send_line_notification(user_id, "ポート登録が完了しました！")
 
 if __name__ == '__main__':
     init_db()

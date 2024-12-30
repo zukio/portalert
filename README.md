@@ -51,11 +51,11 @@ The project utilizes the following libraries:
 - SQLite: For storing user data.
 - APScheduler: For scheduling tasks.
 
-### **データ構造の設計**
+### データ構造の設計
 
 `user_id`を含むデータベーステーブルを設計し、ユーザーとポート、Webhookを関連付けます。
 
-#### **テーブル構造**
+#### テーブル構造
 
 1. **usersテーブル**  
 
@@ -71,15 +71,15 @@ The project utilizes the following libraries:
    | `user_id`        | TEXT        | ユーザーID（usersテーブル参照） |
    | `port_id`        | TEXT        | 登録ポートのID                 |
 
-#### **ポート登録エンドポイント**
+#### ポート登録エンドポイント
 
 `user_id`と`port_id`を受け取り、データベースに保存します。
 
-#### **ポート解除エンドポイント**
+#### ポート解除エンドポイント
 
 特定のユーザーが登録したポートを解除します。
 
-#### **通知ロジック（Webhook通知）**
+#### 通知ロジック（Webhook通知）
 
 登録された全ユーザーのポートを監視し、条件を満たした場合に対応するユーザーごとのWebhookに通知を送信します。
 
@@ -87,6 +87,20 @@ The project utilizes the following libraries:
    Webhookリクエストに`user_id`と`port_id`を含めることで、受け取った側でポートごとに処理可能。
 2. **Webhookの一元化**  
    ユーザーがWebhook URLを自由にカスタマイズ可能（例: LINE Bot、IFTTT、Slack）。
+
+#### 動作フロー
+
+1. **ポート登録**  
+  LINE: ユーザーがポートIDを送信 → /webhookでデータベースに保存。
+  非LINE: ユーザーがフォームを送信 → /set_portでデータベースに保存。
+
+2. **在庫監視**  
+  APSchedulerでcheck_and_notifyを5分ごとに実行。
+  登録ポートの在庫をチェックし、条件を満たす場合に通知。
+
+3. **通知**  
+  LINEユーザーに通知 → send_line_notification
+  非LINEユーザーに通知 → send_webhook_notification
 
 ### ローカルで実行する
 
