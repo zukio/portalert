@@ -8,8 +8,7 @@ from dotenv import load_dotenv
 from flask import Flask, request, render_template, jsonify, redirect, url_for
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
-from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError
+from linebot.v3.webhook import WebhookHandler
 from linebot.v3.messaging import MessagingApi
 from linebot.v3.messaging.models import TextMessage
 from geopy.distance import geodesic
@@ -54,10 +53,10 @@ def init_db():
             CREATE TABLE IF NOT EXISTS user_ports (
                 user_id TEXT,
                 port_id TEXT,
-                PRIMARY KEY (user_id, port_id),
-                FOREIGN KEY (user_id) REFERENCES users(user_id),
                 notification_type TEXT,
-                last_notified INTEGER DEFAULT 0
+                last_notified INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, port_id),
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         ''')
         conn.commit()
@@ -192,7 +191,7 @@ def index():
                 c = conn.cursor()
                 # ユーザーが存在しなければ追加
                 c.execute('INSERT OR IGNORE INTO users (user_id) VALUES (?)', (user_id,))
-								# ポートとWebhook URLを登録
+                # ポートとWebhook URLを登録
                 c.execute('''
                     INSERT INTO user_ports (user_id, port_id, notification_type) 
                     VALUES (?, ?, ?)
