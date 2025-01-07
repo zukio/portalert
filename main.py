@@ -111,20 +111,28 @@ def check_and_notify():
 
     with sqlite3.connect('sharecycle.db') as conn:
         c = conn.cursor()
+        c.execute('PRAGMA table_info(user_ports)')
+        columns = [col[1] for col in c.fetchall()]
+        if 'last_notified' not in columns:
+            c.execute('ALTER TABLE user_ports ADD COLUMN last_notified INTEGER DEFAULT 0')
+            conn.commit()
         c.execute('SELECT user_id, port_id, last_notified FROM user_ports')
         user_ports = c.fetchall()
-
+        
+        updates = []
         for user_id, port_id, last_notified in user_ports:
             station = next((s for s in stations if s['station_id'] == port_id), None)
-
+            # 通知の間隔を確認 (例: 3600秒 = 1時間)
             if station and station['num_bikes_available'] == 1:
-                # 通知の間隔を確認 (例: 3600秒 = 1時間)
                 if current_time - last_notified >= 3600:
                     send_notification(user_id, port_id)
-                    # 通知後、last_notifiedを更新
-                    c.execute('UPDATE user_ports SET last_notified = ? WHERE user_id = ? AND port_id = ?',
-                              (current_time, user_id, port_id))
-                    conn.commit()
+                    updates.append((current_time, user_id, port_id))
+
+        # 一括でデータベースを更新
+        if updates:
+            c.executemany('UPDATE user_ports SET last_notified = ? WHERE user_id = ? AND port_id = ?', updates)
+            conn.commit()
+
 
 # LINEとWebhook通知を統合
 def send_notification(user_id, port_id):
@@ -281,6 +289,8 @@ def handle_message(body, signature):
         logger.info(f"ポート {port_id} がユーザー {user_id} に登録されました。")
         send_line_notification(user_id, "ポート登録が完了しました！")
 
+# アプリケーションのインポート時にデータベースを初期化
+init_db()
+
 if __name__ == '__main__':
-    init_db()
     app.run(debug=True)
