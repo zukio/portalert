@@ -273,21 +273,28 @@ def webhook():
 
 def handle_message(body, signature):
     # LINEイベントデータを解析
-    event = json.loads(body)  # JSONデータを辞書に変換
+    data = json.loads(body)  # JSONデータを辞書に変換
     # 旧 event = MessageEvent.from_dict(body)
-    user_id = event.source.user_id
-    message_text = event.message.text
+    events = data.get('events', [])  # イベントリストを取得
+    for event in events:
+      if event['type'] == 'message' and event['message']['type'] == 'text':
+          user_id = event['source']['userId']  # ユーザーIDを取得
+          message_text = event['message']['text']  # メッセージ内容を取得
 
-    # メッセージがポートIDの場合の処理
-    if message_text.isdigit():
-        port_id = message_text
-        with sqlite3.connect('sharecycle.db') as conn:
-            c = conn.cursor()
-            c.execute('INSERT OR IGNORE INTO users (user_id) VALUES (?)', (user_id,))
-            c.execute('INSERT OR IGNORE INTO user_ports (user_id, port_id) VALUES (?, ?)', (user_id, port_id))
-            conn.commit()
-        logger.info(f"ポート {port_id} がユーザー {user_id} に登録されました。")
-        send_line_notification(user_id, "ポート登録が完了しました！")
+          # メッセージ処理
+          if message_text.isdigit():  # 数字（ポートID）である場合
+              port_id = message_text
+              with sqlite3.connect('sharecycle.db') as conn:
+                  c = conn.cursor()
+                  c.execute('INSERT OR IGNORE INTO users (user_id) VALUES (?)', (user_id,))
+                  c.execute('INSERT OR IGNORE INTO user_ports (user_id, port_id) VALUES (?, ?)', (user_id, port_id))
+                  conn.commit()
+              logger.info(f"ポート {port_id} がユーザー {user_id} に登録されました。")
+              send_line_notification(user_id, "ポート登録が完了しました！")
+          else:
+              logger.info(f"ユーザー {user_id} から無効なメッセージ: {message_text}")
+
+    
 
 # アプリケーションのインポート時にデータベースを初期化
 init_db()
